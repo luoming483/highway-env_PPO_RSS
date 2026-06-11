@@ -1,0 +1,32 @@
+# Python caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE and local agent files
+.idea/
+.vscode/
+.claude/
+
+# Training outputs
+results/
+results_v1_30k/
+
+# TensorBoard and monitor logs
+*.tfevents.*
+*.monitor.csv
+
+# Model artifacts
+*.zip
+*.pt
+*.pth
+*.onnx
+
+# OS files
+.DS_Store
+Thumbs.db
