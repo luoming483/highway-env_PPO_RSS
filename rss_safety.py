@@ -16,6 +16,8 @@ class RSSConfig:
     ttc_threshold: float = 2.0
     lane_width: float = 4.0
     intervention_penalty: float = -2.5
+    nearby_vehicle_horizon: float = 45.0
+    lane_change_side_gap: float = 8.0
     enable_shield: bool = True
 
 
@@ -34,12 +36,8 @@ class RSSSafetyWrapper(gym.Wrapper):
     def __init__(self, env: gym.Env, rss_config: RSSConfig):
         super().__init__(env)
         self.rss = rss_config
-        self._episode_rss_intervened = False
-        self._episode_had_crash = False
 
     def reset(self, **kwargs):
-        self._episode_rss_intervened = False
-        self._episode_had_crash = False
         return self.env.reset(**kwargs)
 
     def _lane_exists(self, lane_index: Tuple[str, str, int]) -> bool:
@@ -147,6 +145,7 @@ class RSSSafetyWrapper(gym.Wrapper):
             "rear_ttc": np.inf,
             "safe_front_distance": np.inf,
             "safe_rear_distance": np.inf,
+            "nearby_risk": False,
         }
 
         if not self._lane_exists(lane_index):
@@ -168,9 +167,17 @@ class RSSSafetyWrapper(gym.Wrapper):
                 "safe_rear_distance": safe_rear,
             }
         )
-
         lane_change = action in (self.ACTION_LEFT, self.ACTION_RIGHT)
+        nearby_risk, nearby_reason = self._scan_nearby_vehicle_risk(
+            ego,
+            lane_index,
+            details,
+            check_rear=lane_change,
+            check_side=lane_change,
+        )
         if lane_change:
+            if nearby_risk:
+                return True, nearby_reason, details
             if front_gap < safe_front or front_ttc < self.rss.ttc_threshold:
                 return True, "lane_change_front_risk", details
             if rear_gap < safe_rear or rear_ttc < self.rss.ttc_threshold:
@@ -178,15 +185,73 @@ class RSSSafetyWrapper(gym.Wrapper):
             return False, "", details
 
         if action == self.ACTION_FASTER:
+            if nearby_risk:
+                return True, nearby_reason, details
             if front_gap < safe_front or front_ttc < self.rss.ttc_threshold:
                 return True, "accel_front_risk", details
         if action == self.ACTION_IDLE:
+            if nearby_risk:
+                return True, nearby_reason, details
             if front_ttc < (0.8 * self.rss.ttc_threshold):
                 return True, "idle_imminent_front_risk", details
         if action == self.ACTION_SLOWER:
             if front_ttc < (0.5 * self.rss.ttc_threshold):
                 return True, "slower_insufficient", details
         return False, "", details
+
+    def _scan_nearby_vehicle_risk(
+        self,
+        ego,
+        lane_index: Tuple[str, str, int],
+        details: dict,
+        check_rear: bool,
+        check_side: bool,
+    ) -> Tuple[bool, str]:
+        lane = self.unwrapped.road.network.get_lane(lane_index)
+        ego_s, _ = lane.local_coordinates(ego.position)
+        ego_s = float(ego_s)
+        horizon = float(self.rss.nearby_vehicle_horizon)
+        side_gap = float(self.rss.lane_change_side_gap)
+        lateral_margin = float(self.rss.lane_width * 0.75)
+
+        for other in self.unwrapped.road.vehicles:
+            if other is ego:
+                continue
+            other_s, other_lat = lane.local_coordinates(other.position)
+            if abs(float(other_lat)) > lateral_margin:
+                continue
+            other_s = float(other_s)
+            gap = float(other_s - ego_s)
+            if abs(gap) > horizon:
+                continue
+
+            if check_side and abs(gap) < side_gap:
+                details["nearby_risk"] = True
+                return True, "nearby_vehicle_side_risk"
+
+            if gap > 0.0:
+                closing = float(ego.speed - other.speed)
+                ttc = gap / closing if closing > 1e-6 else np.inf
+                safe_front = self._safe_distance_front(float(ego.speed), float(other.speed))
+                if gap < safe_front or ttc < self.rss.ttc_threshold:
+                    details["nearby_risk"] = True
+                    details["front_gap"] = min(float(details["front_gap"]), gap)
+                    details["front_ttc"] = min(float(details["front_ttc"]), float(ttc))
+                    return True, "nearby_vehicle_front_risk"
+            else:
+                if not check_rear:
+                    continue
+                rear_gap = -gap
+                closing = float(other.speed - ego.speed)
+                ttc = rear_gap / closing if closing > 1e-6 else np.inf
+                safe_rear = self._safe_distance_rear(float(other.speed), float(ego.speed))
+                if rear_gap < safe_rear or ttc < self.rss.ttc_threshold:
+                    details["nearby_risk"] = True
+                    details["rear_gap"] = min(float(details["rear_gap"]), rear_gap)
+                    details["rear_ttc"] = min(float(details["rear_ttc"]), float(ttc))
+                    return True, "nearby_vehicle_rear_risk"
+
+        return False, ""
 
     def _choose_safe_action(self, original_action: int, risk_reason: str) -> int:
         if risk_reason == "slower_insufficient":
@@ -204,32 +269,24 @@ class RSSSafetyWrapper(gym.Wrapper):
         unsafe, reason, details = self._assess_action_risk(original_action)
         intervened = bool(self.rss.enable_shield and unsafe)
         final_action = self._choose_safe_action(original_action, reason) if intervened else original_action
+        changed_action = bool(intervened and final_action != original_action)
 
         obs, reward, terminated, truncated, info = self.env.step(final_action)
         if info is None:
             info = {}
 
-        if intervened and original_action != self.ACTION_SLOWER:
-            self._episode_rss_intervened = True
-
-        if bool(info.get("crashed", False)):
-            self._episode_had_crash = True
-
-        if terminated or truncated:
-            if self._episode_rss_intervened and self._episode_had_crash:
-                reward = float(reward) + float(self.rss.intervention_penalty)
-            self._episode_rss_intervened = False
-            self._episode_had_crash = False
+        if changed_action:
+            reward = float(reward) + float(self.rss.intervention_penalty)
 
         min_ttc = self._compute_min_ttc()
         min_distance = self._compute_min_distance()
 
         info["rss_enabled"] = bool(self.rss.enable_shield)
-        info["rss_intervened"] = intervened
+        info["rss_intervened"] = changed_action
         info["rss_original_action"] = original_action
         info["rss_final_action"] = final_action
         info["rss_reason"] = reason if intervened else ""
-        info["rss_penalty"] = float(self.rss.intervention_penalty) if intervened else 0.0
+        info["rss_penalty"] = float(self.rss.intervention_penalty) if changed_action else 0.0
         info["rss_min_ttc"] = float(min_ttc)
         info["rss_min_distance"] = float(min_distance)
         info["rss_front_gap"] = float(details["front_gap"])

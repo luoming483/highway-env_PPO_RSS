@@ -16,6 +16,7 @@ env/
 # Training outputs
 results/
 results_v1_30k/
+runs/
 
 # TensorBoard and monitor logs
 *.tfevents.*

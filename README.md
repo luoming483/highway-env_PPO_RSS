@@ -2,13 +2,14 @@
 
 本项目基于 Stable-Baselines3 的 PPO 算法，在 `highway-env` 高速公路场景中训练自动驾驶决策智能体，并加入 RSS 安全屏蔽层，用于比较纯 PPO 与 PPO+RSS 方法在奖励、碰撞率和安全指标上的表现。
 
-当前代码以 `config.py` 中的配置为准，主要运行 3 组实验：
+当前代码以 `config.py` 中的配置为准，默认运行 4 组实验：
 
 | 实验名 | 方法 | RSS | 说明 |
 | --- | --- | --- | --- |
 | `baseline` | Pure PPO | 否 | 纯 PPO 基线 |
-| `our_method` | PPO + RSS | 是 | RSS 干预惩罚为 `-1.0` |
-| `ablation_rss_harsh` | PPO + RSS | 是 | RSS 干预惩罚为 `-2.5`，用于对比更强惩罚 |
+| `our_method` | PPO + RSS + Curriculum | 是 | 完整方法 |
+| `ablation_no_curriculum` | PPO + RSS | 是 | 去掉课程学习 |
+| `ablation_no_rss` | PPO + Curriculum | 否 | 去掉 RSS 安全层 |
 
 ## 项目结构
 
@@ -22,8 +23,9 @@ PPO_SB3/
 ├─ experiment.py          # 批量实验入口：多实验组、多随机种子、保存结果、生成图表
 ├─ plotting.py            # 根据 results.json 生成对比图
 ├─ architecture_flowchart.md
-├─ results/               # 当前实验输出目录
-└─ results_v1_30k/        # 历史实验结果
+├─ runs/                  # 默认版本化实验输出目录
+├─ results/               # 旧版实验输出目录
+└─ results_v1_30k/        # 历史实验结果目录
 ```
 
 ## 运行环境
@@ -53,10 +55,11 @@ python experiment.py
 默认配置来自 `config.py`：
 
 - 环境：`highway-fast-v0`
-- 训练步数：`50_000`
+- 训练步数：`200_000`
 - 并行环境数：`4`
 - 随机种子：`42, 123, 456, 789, 1011`
-- 实验组：`baseline, our_method, ablation_rss_harsh`
+- 实验组：`baseline, our_method, ablation_no_curriculum, ablation_no_rss`
+- 输出目录：`runs/<timestamp>/`
 
 快速测试单个实验：
 
@@ -78,24 +81,30 @@ python experiment.py --device cuda
 python experiment.py --device auto
 ```
 
+指定输出目录名：
+
+```bash
+python experiment.py --run-name test_200k
+```
+
 ## 单独评估模型
 
 评估纯 PPO 模型：
 
 ```bash
-python evaluate.py --model-path results/models/baseline_seed42/final_model.zip
+python evaluate.py --model-path runs/test_200k/models/baseline_seed42/final_model.zip
 ```
 
 评估时启用 RSS 安全屏蔽：
 
 ```bash
-python evaluate.py --model-path results/models/our_method_seed42/final_model.zip --rss
+python evaluate.py --model-path runs/test_200k/models/our_method_seed42/final_model.zip --rss
 ```
 
 指定评估回合数：
 
 ```bash
-python evaluate.py --model-path results/models/our_method_seed42/final_model.zip --rss --episodes 20
+python evaluate.py --model-path runs/test_200k/models/our_method_seed42/final_model.zip --rss --episodes 20
 ```
 
 ## 核心流程
@@ -110,12 +119,12 @@ experiment.py
           ├─ 使用 FlattenObservation 展平观测
           ├─ 创建 PPO(MlpPolicy)
           ├─ 通过 MetricsCollector 采集指标
-          ├─ 保存模型到 results/models/
+          ├─ 保存模型到 runs/<timestamp>/models/
           └─ 返回训练和评估指标
 
 experiment.py
-  ├─ save_results()       -> results/data/results.json
-  └─ generate_plots()     -> results/plots/*.png
+  ├─ save_results()       -> runs/<timestamp>/data/results.json
+  └─ generate_plots()     -> runs/<timestamp>/plots/*.png
 ```
 
 ## RSS 安全层
@@ -138,9 +147,12 @@ RSS 层主要检查：
 - 前车距离和前向 TTC
 - 后车距离和后向 TTC
 - RSS 安全距离
+- 目标车道附近车辆扫描
 - 加速、保持、变道、减速动作是否存在风险
 
 如果动作被判定为危险，并且 `enable_shield=True`，RSS 会替换为更保守的动作，例如 `IDLE` 或 `SLOWER`。
+
+当前版本只要 RSS 真实替换了动作，就会在当步施加 `intervention_penalty`。这比只在回合末尾撞车时惩罚更直接，能让 PPO 更清楚地学习到哪些动作会触发安全干预。
 
 每一步环境交互都会在 `info` 中写入 RSS 相关信息：
 
@@ -180,10 +192,10 @@ rss_safe_rear_distance
 
 ## 输出文件
 
-当前实验输出到 `results/`：
+当前实验默认输出到 `runs/<timestamp>/`，每次运行一个独立目录，避免新旧结果混在一起：
 
 ```text
-results/
+runs/<timestamp>/
 ├─ models/
 │  └─ <experiment>_seed<seed>/final_model.zip
 ├─ logs/
@@ -200,7 +212,7 @@ results/
    └─ 06_training_reward.png
 ```
 
-`results_v1_30k/` 是历史实验结果目录，当前训练默认不会写入该目录。
+`results/` 和 `results_v1_30k/` 是历史实验结果目录，当前训练默认不会写入这两个目录。
 
 ## 修改实验配置
 
@@ -209,7 +221,7 @@ results/
 修改训练步数：
 
 ```python
-TOTAL_TIMESTEPS = 50_000
+TOTAL_TIMESTEPS = 200_000
 ```
 
 修改随机种子：
@@ -240,12 +252,14 @@ PPO_PARAMS = {
 
 ```python
 RSS_CONFIG = {
-    "response_time": 0.8,
-    "rear_response_time": 0.6,
-    "min_distance": 5.0,
+    "response_time": 1.0,
+    "rear_response_time": 0.8,
+    "min_distance": 8.0,
     "max_brake": 6.0,
-    "ttc_threshold": 2.0,
-    "intervention_penalty": -1.0,
+    "ttc_threshold": 3.0,
+    "intervention_penalty": -0.5,
+    "nearby_vehicle_horizon": 45.0,
+    "lane_change_side_gap": 8.0,
     "enable_shield": True,
 }
 ```
@@ -273,14 +287,14 @@ python experiment.py --experiments my_experiment
 
 ## 查看 TensorBoard
 
-训练日志保存在 `results/logs/`，可以使用：
+训练日志保存在每次运行目录的 `logs/` 下，例如：
 
 ```bash
-tensorboard --logdir results/logs
+tensorboard --logdir runs/test_200k/logs
 ```
 
 ## 注意事项
 
-- 当前 `config.py` 中虽然保留了 `CURRICULUM_PHASES`，但默认启用的实验组都设置了 `use_curriculum=False`。
-- 如果要重新启用课程学习，需要在对应实验配置中设置 `use_curriculum=True`。
-- `README.md` 描述的是当前代码版本；历史目录 `results_v1_30k/` 中的实验组可能与当前配置不同。
+- 当前默认训练步数较长，完整实验是 4 个实验组乘以 5 个随机种子。
+- 快速检查代码或流程时，建议先使用 `--experiments our_method --seeds 42 --timesteps 10000 --run-name smoke_test`。
+- `README.md` 描述的是当前代码版本；历史目录 `results/` 和 `results_v1_30k/` 中的实验组可能与当前配置不同。

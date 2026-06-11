@@ -64,8 +64,9 @@ def _build_vec_env(
     seed: int,
     env_config: Dict,
     rss_config: Optional[RSSConfig] = None,
+    log_dir: Path = LOG_DIR,
 ):
-    monitor_dir = Path(LOG_DIR) / f"monitor_seed{seed}"
+    monitor_dir = Path(log_dir) / f"monitor_seed{seed}"
     monitor_dir.mkdir(parents=True, exist_ok=True)
     return make_vec_env(
         ENV_ID,
@@ -126,13 +127,27 @@ def _build_phase_plan(total_timesteps: int, use_curriculum: bool) -> List[Dict]:
     ]
 
 
-def _train_phase(model, phase: Dict, seed: int, n_envs: int, device: str, rss_config, collector: MetricsCollector, verbose: int):
+def _train_phase(
+    model,
+    phase: Dict,
+    seed: int,
+    n_envs: int,
+    device: str,
+    rss_config,
+    collector: MetricsCollector,
+    verbose: int,
+    log_dir: Path,
+):
     phase_name = phase["name"]
     phase_steps = int(phase["timesteps"])
     phase_env_cfg = phase["env_config"]
 
     train_env = _build_vec_env(
-        n_envs=n_envs, seed=seed + 100, env_config=phase_env_cfg, rss_config=rss_config
+        n_envs=n_envs,
+        seed=seed + 100,
+        env_config=phase_env_cfg,
+        rss_config=rss_config,
+        log_dir=log_dir,
     )
 
     if model is None:
@@ -144,7 +159,7 @@ def _train_phase(model, phase: Dict, seed: int, n_envs: int, device: str, rss_co
             policy="MlpPolicy",
             env=train_env,
             policy_kwargs=policy_kwargs,
-            tensorboard_log=str(LOG_DIR),
+            tensorboard_log=str(log_dir),
             device=device,
             seed=seed,
             verbose=verbose,
@@ -174,6 +189,8 @@ def run_training(
     device: str = "cpu",
     verbose: int = 0,
     rss_overrides: Optional[Dict] = None,
+    model_dir: Path = MODEL_DIR,
+    log_dir: Path = LOG_DIR,
 ) -> Dict:
     """Train PPO agent. Returns structured metrics dict."""
     _set_seed(seed)
@@ -204,14 +221,13 @@ def run_training(
         print(f"  [{phase['name']}] {phase['timesteps']} steps "
               f"(vehicles={phase['env_config']['vehicles_count']}, "
               f"density={phase['env_config']['vehicles_density']})")
-        model = _train_phase(model, phase, seed, n_envs, device, rss_config, collector, verbose)
+        model = _train_phase(model, phase, seed, n_envs, device, rss_config, collector, verbose, log_dir)
 
     # Final evaluation
-    final_eval_env = _build_single_env(target_env_cfg, rss_config=rss_config)
     collector.run_final_evaluation(lambda: _build_single_env(target_env_cfg, rss_config=rss_config))
 
     # Save model
-    save_dir = Path(MODEL_DIR) / f"{exp_name}_seed{seed}"
+    save_dir = Path(model_dir) / f"{exp_name}_seed{seed}"
     save_dir.mkdir(parents=True, exist_ok=True)
     save_path = save_dir / "final_model"
     model.save(str(save_path))
