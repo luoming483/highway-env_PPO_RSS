@@ -36,8 +36,12 @@ class RSSSafetyWrapper(gym.Wrapper):
     def __init__(self, env: gym.Env, rss_config: RSSConfig):
         super().__init__(env)
         self.rss = rss_config
+        self._episode_rss_intervened = False
+        self._episode_had_crash = False
 
     def reset(self, **kwargs):
+        self._episode_rss_intervened = False
+        self._episode_had_crash = False
         return self.env.reset(**kwargs)
 
     def _lane_exists(self, lane_index: Tuple[str, str, int]) -> bool:
@@ -258,11 +262,11 @@ class RSSSafetyWrapper(gym.Wrapper):
             return self.ACTION_SLOWER
         if original_action == self.ACTION_FASTER:
             return self.ACTION_SLOWER
-        if original_action in (self.ACTION_LEFT, self.ACTION_RIGHT):
-            return self.ACTION_IDLE
         if original_action == self.ACTION_IDLE:
             return self.ACTION_SLOWER
-        return self.ACTION_IDLE
+        if original_action in (self.ACTION_LEFT, self.ACTION_RIGHT):
+            return self.ACTION_SLOWER
+        return self.ACTION_SLOWER
 
     def step(self, action):
         original_action = int(action)
@@ -276,7 +280,16 @@ class RSSSafetyWrapper(gym.Wrapper):
             info = {}
 
         if changed_action:
-            reward = float(reward) + float(self.rss.intervention_penalty)
+            self._episode_rss_intervened = True
+
+        if bool(info.get("crashed", False)):
+            self._episode_had_crash = True
+
+        if terminated or truncated:
+            if self._episode_rss_intervened and self._episode_had_crash:
+                reward = float(reward) + float(self.rss.intervention_penalty)
+            self._episode_rss_intervened = False
+            self._episode_had_crash = False
 
         min_ttc = self._compute_min_ttc()
         min_distance = self._compute_min_distance()

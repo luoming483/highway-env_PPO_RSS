@@ -30,12 +30,12 @@ ENV_CONFIG = {
     "duration": 60,
     "simulation_frequency": 8,
     "policy_frequency": 4,
-    "collision_reward": -10.0,
+    "collision_reward": -5.0,
     "right_lane_reward": 0.02,
     "high_speed_reward": 0.70,
     "lane_change_reward": 0.12,
     "reward_speed_range": [20, 30],
-    "normalize_reward": False,
+    "normalize_reward": True,
     "offroad_terminal": True,
 }
 
