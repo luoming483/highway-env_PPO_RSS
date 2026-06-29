@@ -13,10 +13,45 @@ PPO reinforcement learning + RSS safety shield for autonomous driving on `highwa
 - `plotting.py` — paper-quality matplotlib plots (reward, collision, loss, safety, bar charts)
 - `experiment.py` — experiment orchestration: run all experiments × seeds, save JSON, generate plots
 - `README.md` — comprehensive beginner-friendly documentation
+- `stackelberg/` — Stackelberg game + FSM expert module (研究内容一)
 
 **Output structure:** `results/models/`, `results/plots/`, `results/data/`
 
 **Env:** `highway-fast-v0` with DiscreteMetaAction (5 actions: LANE_LEFT, IDLE, LANE_RIGHT, FASTER, SLOWER)
+
+---
+
+## Three-Expert Architecture (Thesis Plan)
+
+The complete thesis targets a Mixture-of-Experts (MoE) framework with three decision modules:
+
+| Expert | Module | Status | Description |
+|--------|--------|--------|-------------|
+| Game Expert | `stackelberg/` | Implemented | Stackelberg leader-follower game + FSM governance |
+| RL Expert | `train.py` + PPO | Implemented | PPO-trained policy (currently discrete, needs continuous action upgrade) |
+| RSS Shield | `rss_safety.py` | Implemented | RSS safety envelope for action-level override |
+| MoE Gating | (future) | Not started | Scene-adaptive gating network fusing experts |
+
+### stackelberg/ module
+
+Stackelberg game based on trajectory prediction for lane change in mixed traffic.
+Reference: Shi B, Zhai L, Liu C. IEEE Access.
+
+```
+stackelberg/
+    __init__.py              # Package exports
+    config.py                # GameConfig + driving style weight table (paper Table 1)
+    trajectory_predictor.py  # Linear decay acceleration model (paper eq.4-2~4-4)
+    utility_functions.py     # HV utility (eq.7-11) + EV cost (eq.13-18)
+    game_solver.py           # Stackelberg equilibrium solver (simplified Algorithm 1)
+    fsm_executor.py          # 4-state FSM + safety gating + rate limiting (tech roadmap 2.1.2)
+    stackelberg_expert.py    # Top-level expert: Game → FSM → Action
+    test_expert.py           # Smoke tests
+```
+
+**Decision pipeline:** Perception → Stackelberg Game Solver → FSM Governance → Action
+
+**Test:** `D:\anaconda\envs\ppo_main\python.exe -m stackelberg.test_expert`
 
 ---
 
