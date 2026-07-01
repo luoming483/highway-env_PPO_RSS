@@ -31,6 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from config import RSS_CONFIG
 from rss import RSSConfig, RSSSafetyWrapper
+from scene_utils import compute_front_ttc_gap
 from stackelberg.config import GameConfig
 from stackelberg.expert import StackelbergExpert
 from moe_hybrid import HybridExpert, MoEGate, SceneFeatures
@@ -128,20 +129,10 @@ def run_stackelberg(env, game_config: GameConfig, max_steps: int = 200) -> EvalR
         speeds.append(float(env.unwrapped.vehicle.speed))
 
         # TTC/gap
-        ego = env.unwrapped.vehicle
-        road = env.unwrapped.road
-        front, _ = road.neighbour_vehicles(ego, ego.lane_index)
-        if front is not None:
-            try:
-                lane = road.network.get_lane(ego.lane_index)
-                ego_s = float(lane.local_coordinates(ego.position)[0])
-                front_s = float(lane.local_coordinates(front.position)[0])
-                gap = front_s - ego_s
-                rel = float(ego.speed - front.speed)
-                gaps.append(gap)
-                ttcs.append(gap / rel if gap > 0 and rel > 1e-6 else float("inf"))
-            except (ValueError, IndexError):
-                pass
+        gap, ttc, _ = compute_front_ttc_gap(env)
+        if gap < float("inf"):
+            gaps.append(gap)
+            ttcs.append(ttc)
 
         if action in (0, 2):  # LEFT or RIGHT
             lc_count += 1
@@ -184,21 +175,11 @@ def run_ppo_rss(flat_env, ppo_model, max_steps: int = 200) -> EvalResult:
         actions[action] = actions.get(action, 0) + 1
 
         env = flat_env.unwrapped.unwrapped if hasattr(flat_env, 'unwrapped') else flat_env
-        ego = env.unwrapped.vehicle
-        road = env.unwrapped.road
-        speeds.append(float(ego.speed))
-        front, _ = road.neighbour_vehicles(ego, ego.lane_index)
-        if front is not None:
-            try:
-                lane = road.network.get_lane(ego.lane_index)
-                ego_s = float(lane.local_coordinates(ego.position)[0])
-                front_s = float(lane.local_coordinates(front.position)[0])
-                gap = front_s - ego_s
-                rel = float(ego.speed - front.speed)
-                gaps.append(gap)
-                ttcs.append(gap / rel if gap > 0 and rel > 1e-6 else float("inf"))
-            except (ValueError, IndexError):
-                pass
+        speeds.append(float(env.unwrapped.vehicle.speed))
+        gap, ttc, _ = compute_front_ttc_gap(env)
+        if gap < float("inf"):
+            gaps.append(gap)
+            ttcs.append(ttc)
 
         if env_info.get("crashed", False):
             crashed = True

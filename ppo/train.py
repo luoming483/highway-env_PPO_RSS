@@ -1,10 +1,13 @@
 """Single training function for PPO + RSS experiments. Called by experiment.py."""
 
 import random
+import sys
 import time
 from copy import deepcopy
 from pathlib import Path
 from typing import Dict, List, Optional
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import gymnasium as gym
 import highway_env  # noqa: F401
@@ -36,6 +39,7 @@ from config import (
     TOTAL_TIMESTEPS,
 )
 from rss import RSSConfig, RSSSafetyWrapper
+from scene_utils import check_ego_blocked
 from metrics import MetricsCollector
 
 
@@ -66,19 +70,8 @@ class ForceExploreWrapper(gym.Wrapper):
         self._step_count = 0
 
     def _check_blocked(self):
-        ego = self.unwrapped.vehicle
-        road = self.unwrapped.road
-        front, _ = road.neighbour_vehicles(ego, ego.lane_index)
-        if front is None:
-            return False
-        try:
-            lane = road.network.get_lane(ego.lane_index)
-            ego_s = float(lane.local_coordinates(ego.position)[0])
-            front_s = float(lane.local_coordinates(front.position)[0])
-            gap = front_s - ego_s
-            return 0 < gap < self._gap_threshold and front.speed < self._speed_ratio * ego.speed
-        except (ValueError, IndexError):
-            return False
+        blocked, _, _ = check_ego_blocked(self, self._gap_threshold, self._speed_ratio)
+        return blocked
 
     def step(self, action):
         self._step_count += 1
@@ -122,20 +115,8 @@ class BlockedPenaltyWrapper(gym.Wrapper):
         self._lc_bonus = lc_attempt_bonus
 
     def _check_blocked(self):
-        """Check if ego is stuck behind a slow vehicle in same lane."""
-        ego = self.unwrapped.vehicle
-        road = self.unwrapped.road
-        front, _ = road.neighbour_vehicles(ego, ego.lane_index)
-        if front is None:
-            return False
-        try:
-            lane = road.network.get_lane(ego.lane_index)
-            ego_s = float(lane.local_coordinates(ego.position)[0])
-            front_s = float(lane.local_coordinates(front.position)[0])
-            gap = front_s - ego_s
-            return 0 < gap < self._gap_threshold and front.speed < self._speed_ratio * ego.speed
-        except (ValueError, IndexError):
-            return False
+        blocked, _, _ = check_ego_blocked(self, self._gap_threshold, self._speed_ratio)
+        return blocked
 
     def step(self, action):
         is_blocked = self._check_blocked()

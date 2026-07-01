@@ -25,7 +25,7 @@ from config import (
     SEEDS,
     TOTAL_TIMESTEPS,
 )
-from train import run_training
+from ppo.train import run_training
 from plotting import (
     plot_collision_comparison,
     plot_final_performance_bar,

@@ -17,6 +17,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
+from scene_utils import check_lane_exists
+
 from .config import DRIVING_STYLE_WEIGHTS, GameConfig
 from .trajectory_predictor import (
     TrajectoryPoint,
@@ -64,14 +66,6 @@ class GameResult:
     candidates_evaluated: int
 
 
-@dataclass
-class KeyVehicles:
-    """Surrounding vehicles relevant to lane-change decision."""
-    fv_curr: Optional[VehicleState] = None   # front vehicle in current lane
-    fv_target: Optional[VehicleState] = None # front vehicle in target lane
-    rv_target: Optional[VehicleState] = None # rear vehicle in target lane (the HV)
-
-
 class StackelbergSolver:
     """Core Stackelberg game solver for lane-changing decisions."""
 
@@ -94,94 +88,8 @@ class StackelbergSolver:
             heading=float(getattr(vehicle, 'heading', 0.0) or 0.0),
         )
 
-    def _identify_key_vehicles(self, env) -> KeyVehicles:
-        """Identify FV_curr, FV_target, RV_target from highway-env state."""
-        ego = env.unwrapped.vehicle
-        ego_lane = ego.lane_index
-        road = env.unwrapped.road
-
-        result = KeyVehicles()
-        all_vehicles = [v for v in road.vehicles if v is not ego]
-
-        ego_pos = np.array(ego.position)
-        ego_lane_coords = road.network.get_lane(ego_lane).local_coordinates(ego.position)
-        ego_s = float(ego_lane_coords[0])
-
-        for v in all_vehicles:
-            v_pos = np.array(v.position)
-            v_lane = v.lane_index
-
-            # Get longitudinal position in ego's lane
-            try:
-                v_coords = road.network.get_lane(ego_lane).local_coordinates(v.position)
-                v_s = float(v_coords[0])
-                lat_dist = float(v_coords[1])
-            except (ValueError, IndexError):
-                continue
-
-            # Same lane
-            if v_lane == ego_lane:
-                if v_s > ego_s:  # ahead
-                    if result.fv_curr is None or v_s < (
-                        road.network.get_lane(ego_lane).local_coordinates(
-                            result.fv_curr._raw_position
-                        )[0] if hasattr(result.fv_curr, '_raw_position') else float('inf')
-                    ):
-                        state = self._extract_vehicle_state(v)
-                        state._raw_position = v_pos
-                        state._s = v_s
-                        result.fv_curr = state
-
-        # Target lane vehicles
-        for lateral in [-1, 1]:  # left, right
-            target_lane = (ego_lane[0], ego_lane[1], ego_lane[2] + lateral)
-            if not self._lane_exists(road, target_lane):
-                continue
-
-            target_lane_obj = road.network.get_lane(target_lane)
-            try:
-                tgt_coords = target_lane_obj.local_coordinates(ego_pos)
-                ego_s_tgt = float(tgt_coords[0])
-            except (ValueError, IndexError):
-                continue
-
-            best_fv = None
-            best_rv = None
-            best_fv_s = float('inf')
-            best_rv_s = float('-inf')
-
-            for v in all_vehicles:
-                if v.lane_index != target_lane:
-                    continue
-                try:
-                    v_coords = target_lane_obj.local_coordinates(v.position)
-                    v_s = float(v_coords[0])
-                except (ValueError, IndexError):
-                    continue
-
-                if v_s > ego_s_tgt:  # ahead
-                    if v_s < best_fv_s:
-                        best_fv_s = v_s
-                        best_fv = v
-                else:  # behind
-                    if v_s > best_rv_s:
-                        best_rv_s = v_s
-                        best_rv = v
-
-            if lateral == -1 and not result.rv_target:  # left lane priority
-                pass  # will be set below based on which lane we're evaluating
-
-            # Store all results
-            pass
-
-        return result
-
     def _lane_exists(self, road, lane_index: Tuple) -> bool:
-        start, end, lane_id = lane_index
-        graph = road.network.graph
-        if start not in graph or end not in graph[start]:
-            return False
-        return 0 <= lane_id < len(graph[start][end])
+        return check_lane_exists(road, lane_index)
 
     def _get_vehicles_for_lane(self, env, target_lateral: int) -> Tuple[Optional[VehicleState], Optional[VehicleState], Optional[VehicleState]]:
         """Get (FV_curr, FV_target, RV_target) for a specific target lane.

@@ -5,7 +5,7 @@ from copy import deepcopy
 import config
 from config import ENV_CONFIG, RSS_CONFIG, TRAIN_RSS_OVERRIDES
 from rss import RSSConfig
-from train import run_training
+from ppo.train import run_training
 
 SEED = 42
 

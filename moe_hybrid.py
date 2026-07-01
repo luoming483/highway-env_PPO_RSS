@@ -33,6 +33,7 @@ from stable_baselines3 import PPO
 
 from config import RSS_CONFIG
 from rss import RSSConfig, check_rss_safety
+from scene_utils import check_lane_exists, check_ego_blocked, classify_density
 from stackelberg.config import GameConfig
 from stackelberg.expert import StackelbergExpert
 from stackelberg.game_solver import GameResult
@@ -109,19 +110,14 @@ class SceneFeatures:
                 if closing > 1e-6:
                     min_ttc = min(min_ttc, dx / closing)
 
-        # Density classification
-        if num_nearby <= 5:
-            density = "sparse"
-        elif num_nearby <= 12:
-            density = "medium"
-        else:
-            density = "dense"
+        # Density classification from env config
+        density = classify_density(env)
 
         # Lane change feasibility: can we reach the target lane?
         lc_feasible = False
         if game_result.lateral_choice != 0:
             target_lane = (ego_lane[0], ego_lane[1], ego_lane[2] + game_result.lateral_choice)
-            lc_feasible = _lane_exists(road, target_lane)
+            lc_feasible = check_lane_exists(road, target_lane)
 
         return cls(
             front_ttc=float(front_ttc),
@@ -135,14 +131,6 @@ class SceneFeatures:
             num_vehicles_nearby=num_nearby,
             density_level=density,
         )
-
-
-def _lane_exists(road, lane_index: Tuple) -> bool:
-    start, end, lane_id = lane_index
-    graph = road.network.graph
-    if start not in graph or end not in graph.get(start, {}):
-        return False
-    return 0 <= lane_id < len(graph[start][end])
 
 
 @dataclass
@@ -187,6 +175,14 @@ class MoEGate:
         self.min_speed_for_lc = min_speed_for_lc
         self._prev_expert: str = "ppo_rss"
         self._stackelberg_streak: int = 0  # hysteresis counter
+        self._stackelberg_lc_count: int = 0  # LCs executed in current streak
+        self._rescue_cooldown: int = 0  # cooldown after failed blocked-rescue
+
+    def feedback(self, action: int, expert: str):
+        """Called after action execution; tracks whether Stackelberg actually
+        performed a lane change during the current streak."""
+        if expert == "stackelberg" and action in (ACTION_LEFT, ACTION_RIGHT):
+            self._stackelberg_lc_count += 1
 
     def select(self, scene: SceneFeatures, is_blocked: bool = False) -> GateDecision:
         """Select the best expert for the current scene.
@@ -243,14 +239,17 @@ class MoEGate:
 
         # Condition B: Blocked rescue — PPO is stuck behind slower vehicle.
         # Force Stackelberg to attempt a game-theoretic lane change.
+        # Skip if still in cooldown from a previous failed rescue.
         blocked_rescue = (
             is_blocked
             and not solver_recommends
-            and density != "sparse"  # sparse: blocking is rare, don't force
+            and density != "sparse"
+            and self._rescue_cooldown <= 0
         )
 
-        # Hysteresis: if Stackelberg was selected recently, keep it
-        # for a few more steps to avoid flickering.
+        # Hysteresis: keep Stackelberg active after initial selection to
+        # avoid flickering. Default 8-step window gives FSM time to find a
+        # safe gap and execute the lane change maneuver.
         hysteresis = (
             self._prev_expert == "stackelberg"
             and self._stackelberg_streak < 8
@@ -258,6 +257,8 @@ class MoEGate:
 
         if solver_recommends or blocked_rescue or hysteresis:
             if solver_recommends:
+                # Reset rescue cooldown on proactive solver LC
+                self._rescue_cooldown = 0
                 reason = (
                     f"solver LC: cost_imp={scene.cost_improvement:.2f}, "
                     f"lat={scene.lateral_choice}, ttc={scene.front_ttc:.1f}s, "
@@ -265,13 +266,13 @@ class MoEGate:
                 )
             elif blocked_rescue:
                 reason = (
-                    f"blocked rescue: ego blocked {self._stackelberg_streak}+ steps, "
+                    f"blocked rescue: ego blocked, "
                     f"density={density}, forcing Stackelberg LC attempt"
                 )
             else:
                 reason = (
                     f"hysteresis: continuing Stackelberg streak={self._stackelberg_streak}, "
-                    f"density={density}"
+                    f"lcs={self._stackelberg_lc_count}, density={density}"
                 )
 
             self._stackelberg_streak += 1
@@ -284,7 +285,15 @@ class MoEGate:
             )
 
         # ---- Tier 3: PPO+RSS Speed Optimization ----
+        # If Stackelberg streak ended without any LC (failed rescue),
+        # brief cooldown to prevent instant re-trigger oscillation.
+        if self._prev_expert == "stackelberg" and self._stackelberg_lc_count == 0:
+            self._rescue_cooldown = 3
+        elif self._rescue_cooldown > 0:
+            self._rescue_cooldown -= 1
+
         self._stackelberg_streak = 0
+        self._stackelberg_lc_count = 0
         self._prev_expert = "ppo_rss"
         return GateDecision(
             expert="ppo_rss",
@@ -341,19 +350,8 @@ class HybridExpert:
         self._blocked_threshold: int = 3  # consecutive steps before gate relaxes
 
     def _check_ego_blocked(self, env) -> bool:
-        """Check if ego is persistently blocked behind a slower front vehicle."""
-        ego = env.unwrapped.vehicle
-        front, _ = env.unwrapped.road.neighbour_vehicles(ego, ego.lane_index)
-        if front is None:
-            return False
-        try:
-            lane = env.unwrapped.road.network.get_lane(ego.lane_index)
-            ego_s = float(lane.local_coordinates(ego.position)[0])
-            front_s = float(lane.local_coordinates(front.position)[0])
-            gap = front_s - ego_s
-            return gap < 80.0 and float(front.speed) < 0.85 * float(ego.speed)
-        except (ValueError, IndexError):
-            return False
+        blocked, _, _ = check_ego_blocked(env)
+        return blocked
 
     def _build_rescue_game_result(self, env, original: "GameResult") -> "GameResult":
         """Build a GameResult that tells FSM to try a lane change in the
@@ -459,6 +457,7 @@ class HybridExpert:
                 "fsm_state": str(fsm_info.state) if hasattr(fsm_info, 'state') else "",
                 "fsm_reason": fsm_info.reason if hasattr(fsm_info, 'reason') else "",
             }
+            self.gate.feedback(action, "stackelberg")
             self.stackelberg._step_count += 1
         else:  # ppo_rss
             raw_action, _ = self.ppo_model.predict(obs, deterministic=True)
@@ -503,6 +502,8 @@ class HybridExpert:
         self.stackelberg.reset()
         self.gate._prev_expert = "ppo_rss"
         self.gate._stackelberg_streak = 0
+        self.gate._stackelberg_lc_count = 0
+        self.gate._rescue_cooldown = 0
         self._blocked_steps = 0
 
     @property

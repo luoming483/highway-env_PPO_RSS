@@ -29,6 +29,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from scene_utils import compute_front_ttc_gap
 from stackelberg import GameConfig, StackelbergExpert
 
 # ---- Config ----
@@ -177,24 +178,12 @@ def run_idm_baseline(env: gym.Env, density: str = "", seed: int = 0) -> RunResul
         actions[1] = actions.get(1, 0) + 1
 
         # Compute gap/TTC using same method as Stackelberg for fair comparison
-        try:
-            road = env.unwrapped.road
-            ego_lane = ego.lane_index
-            lane = road.network.get_lane(ego_lane)
-            ego_s, _ = lane.local_coordinates(ego.position)
-            front, _ = road.neighbour_vehicles(ego, ego_lane)
-            if front is not None:
-                front_s, _ = lane.local_coordinates(front.position)
-                gap = float(front_s) - float(ego_s)
-                rel_speed = float(ego.speed) - float(front.speed)
-                if gap < min_gap:
-                    min_gap = gap
-                if rel_speed > 1e-6 and gap > 0:
-                    ttc = gap / rel_speed
-                    if ttc < min_ttc:
-                        min_ttc = ttc
-        except (ValueError, IndexError, AttributeError):
-            pass
+        gap, ttc, _ = compute_front_ttc_gap(env)
+        if gap < float("inf"):
+            if gap < min_gap:
+                min_gap = gap
+            if ttc < min_ttc:
+                min_ttc = ttc
 
         if env_info.get("crashed", False):
             crashed = True
@@ -230,24 +219,12 @@ def run_random(env: gym.Env, density: str = "", seed: int = 0) -> RunResult:
         if action in (0, 2):
             lc_count += 1
 
-        try:
-            road = env.unwrapped.road
-            ego_lane = ego.lane_index
-            lane = road.network.get_lane(ego_lane)
-            ego_s, _ = lane.local_coordinates(ego.position)
-            front, _ = road.neighbour_vehicles(ego, ego_lane)
-            if front is not None:
-                front_s, _ = lane.local_coordinates(front.position)
-                gap = float(front_s) - float(ego_s)
-                rel_speed = float(ego.speed) - float(front.speed)
-                if gap < min_gap:
-                    min_gap = gap
-                if rel_speed > 1e-6 and gap > 0:
-                    ttc = gap / rel_speed
-                    if ttc < min_ttc:
-                        min_ttc = ttc
-        except (ValueError, IndexError, AttributeError):
-            pass
+        gap, ttc, _ = compute_front_ttc_gap(env)
+        if gap < float("inf"):
+            if gap < min_gap:
+                min_gap = gap
+            if ttc < min_ttc:
+                min_ttc = ttc
 
         if env_info.get("crashed", False):
             crashed = True

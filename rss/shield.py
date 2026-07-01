@@ -6,6 +6,8 @@ from typing import Optional, Tuple
 import gymnasium as gym
 import numpy as np
 
+from scene_utils import check_lane_exists, get_lane_longitudinal
+
 
 @dataclass
 class RSSConfig:
@@ -19,22 +21,6 @@ class RSSConfig:
     nearby_vehicle_horizon: float = 45.0
     lane_change_side_gap: float = 8.0
     enable_shield: bool = True
-
-
-# Standalone RSS helpers (used by both check_rss_safety and RSSSafetyWrapper)
-
-def _lane_exists(road, lane_index: Tuple) -> bool:
-    start, end, lane_id = lane_index
-    graph = road.network.graph
-    if start not in graph or end not in graph.get(start, {}):
-        return False
-    return 0 <= lane_id < len(graph[start][end])
-
-
-def _lane_longitudinal(road, lane_index: Tuple, vehicle) -> float:
-    lane = road.network.get_lane(lane_index)
-    longi, _ = lane.local_coordinates(vehicle.position)
-    return float(longi)
 
 
 def _safe_distance_front_st(rss_cfg: RSSConfig, ego_speed: float, front_speed: float) -> float:
@@ -109,7 +95,7 @@ def check_rss_safety(env, action: int, rss_cfg: RSSConfig) -> Tuple[bool, str]:
     else:
         lane_index = current_lane
 
-    if not _lane_exists(road, lane_index):
+    if not check_lane_exists(road, lane_index):
         return True, "invalid_lane"
 
     front, rear = road.neighbour_vehicles(ego, lane_index)
@@ -118,8 +104,8 @@ def check_rss_safety(env, action: int, rss_cfg: RSSConfig) -> Tuple[bool, str]:
     front_gap = np.inf
     front_ttc = np.inf
     if front is not None:
-        ego_s = _lane_longitudinal(road, lane_index, ego)
-        front_s = _lane_longitudinal(road, lane_index, front)
+        ego_s = get_lane_longitudinal(road, lane_index, ego)
+        front_s = get_lane_longitudinal(road, lane_index, front)
         front_gap = float(front_s - ego_s)
         rel_speed = float(ego.speed - front.speed)
         if front_gap > 0.0 and rel_speed > 1e-6:
@@ -129,8 +115,8 @@ def check_rss_safety(env, action: int, rss_cfg: RSSConfig) -> Tuple[bool, str]:
     rear_gap = np.inf
     rear_ttc = np.inf
     if rear is not None:
-        ego_s = _lane_longitudinal(road, lane_index, ego)
-        rear_s = _lane_longitudinal(road, lane_index, rear)
+        ego_s = get_lane_longitudinal(road, lane_index, ego)
+        rear_s = get_lane_longitudinal(road, lane_index, rear)
         rear_gap = float(ego_s - rear_s)
         rel_speed = float(rear.speed - ego.speed)
         if rear_gap > 0.0 and rel_speed > 1e-6:
@@ -196,17 +182,10 @@ class RSSSafetyWrapper(gym.Wrapper):
         return self.env.reset(**kwargs)
 
     def _lane_exists(self, lane_index: Tuple[str, str, int]) -> bool:
-        start, end, lane_id = lane_index
-        graph = self.unwrapped.road.network.graph
-        if start not in graph or end not in graph[start]:
-            return False
-        lanes = graph[start][end]
-        return 0 <= lane_id < len(lanes)
+        return check_lane_exists(self.unwrapped.road, lane_index)
 
     def _lane_longitudinal(self, lane_index: Tuple[str, str, int], vehicle) -> float:
-        lane = self.unwrapped.road.network.get_lane(lane_index)
-        longi, _ = lane.local_coordinates(vehicle.position)
-        return float(longi)
+        return get_lane_longitudinal(self.unwrapped.road, lane_index, vehicle)
 
     def _safe_distance_front(self, ego_speed: float, front_speed: float) -> float:
         braking_term = max(0.0, (ego_speed**2 - front_speed**2) / (2.0 * max(self.rss.max_brake, 1e-3)))

@@ -3,6 +3,8 @@
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 import gymnasium as gym
 import highway_env  # noqa: F401
 import numpy as np
@@ -10,8 +12,8 @@ from gymnasium.wrappers import FlattenObservation
 from stable_baselines3 import PPO
 
 from config import ENV_CONFIG, RSS_CONFIG, PPO_PARAMS
+from ppo.train import run_training
 from rss import RSSConfig, RSSSafetyWrapper
-from train import run_training
 
 SEED = 42
 STEPS = 50_000

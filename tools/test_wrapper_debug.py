@@ -8,7 +8,7 @@ import highway_env  # noqa: F401
 import numpy as np
 from config import ENV_CONFIG, RSS_CONFIG, TRAIN_RSS_OVERRIDES, BLOCKED_PENALTY
 from rss import RSSConfig, RSSSafetyWrapper
-from train import BlockedPenaltyWrapper, ForceExploreWrapper
+from ppo.train import BlockedPenaltyWrapper, ForceExploreWrapper
 
 # Build the exact same wrapper chain used in training
 rss_params = dict(RSS_CONFIG)

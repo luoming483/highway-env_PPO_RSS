@@ -22,6 +22,8 @@ from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
 
+from scene_utils import check_lane_exists, get_lane_longitudinal
+
 from .config import GameConfig
 
 # highway-env action constants (matching rss_safety.py)
@@ -302,11 +304,7 @@ class FSMExecutor:
         return front_gap, front_rel_speed, rear_gap, rear_rel_speed
 
     def _lane_exists(self, road, lane_index: Tuple) -> bool:
-        start, end, lane_id = lane_index
-        graph = road.network.graph
-        if start not in graph or end not in graph.get(start, {}):
-            return False
-        return 0 <= lane_id < len(graph[start][end])
+        return check_lane_exists(road, lane_index)
 
     def _get_min_front_ttc(self, env) -> float:
         """Find minimum TTC to front vehicles in the ego's lane or adjacent lanes.

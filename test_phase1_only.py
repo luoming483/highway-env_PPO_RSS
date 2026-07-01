@@ -11,7 +11,7 @@ from stable_baselines3 import PPO
 import config
 from config import ENV_CONFIG, RSS_CONFIG
 from rss import RSSConfig, RSSSafetyWrapper
-from train import run_training
+from ppo.train import run_training
 
 SEED = 42
 STEPS = 50_000

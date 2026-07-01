@@ -9,7 +9,8 @@ import highway_env  # noqa: F401
 import numpy as np
 from config import ENV_CONFIG, RSS_CONFIG, TRAIN_RSS_OVERRIDES
 from rss import RSSConfig, RSSSafetyWrapper
-from train import BlockedPenaltyWrapper, ForceExploreWrapper
+from scene_utils import check_ego_blocked, compute_front_ttc_gap
+from ppo.train import BlockedPenaltyWrapper, ForceExploreWrapper
 
 rss_params = dict(RSS_CONFIG)
 rss_params.update(TRAIN_RSS_OVERRIDES)
@@ -33,20 +34,7 @@ for ep in range(5):
         action = 3  # Always FASTER
 
         # Manual blocked check (same logic as in wrappers)
-        ego = env.unwrapped.vehicle
-        road = env.unwrapped.road
-        front, _ = road.neighbour_vehicles(ego, ego.lane_index)
-        is_blocked = False
-        gap = float('inf')
-        front_speed = 0
-        if front is not None:
-            lane = road.network.get_lane(ego.lane_index)
-            ego_s = float(lane.local_coordinates(ego.position)[0])
-            front_s = float(lane.local_coordinates(front.position)[0])
-            gap = front_s - ego_s
-            front_speed = float(front.speed)
-            if (0 < gap < 80.0 and front_speed < 0.90 * ego.speed):
-                is_blocked = True
+        is_blocked, gap, front_speed = check_ego_blocked(env, gap_threshold=80.0, speed_ratio=0.90)
 
         obs, reward, term, trunc, info = env.step(action)
 
@@ -74,17 +62,10 @@ obs, _ = env.reset()
 gaps = []
 speed_ratios = []
 for _ in range(400):
-    ego = env.unwrapped.vehicle
-    road = env.unwrapped.road
-    front, _ = road.neighbour_vehicles(ego, ego.lane_index)
-    if front is not None:
-        lane = road.network.get_lane(ego.lane_index)
-        ego_s = float(lane.local_coordinates(ego.position)[0])
-        front_s = float(lane.local_coordinates(front.position)[0])
-        gap = front_s - ego_s
-        if gap > 0:
-            gaps.append(gap)
-            speed_ratios.append(float(front.speed) / max(float(ego.speed), 1e-6))
+    gap, _, front_speed = compute_front_ttc_gap(env)
+    if gap > 0 and gap < float('inf'):
+        gaps.append(gap)
+        speed_ratios.append(front_speed / max(float(env.unwrapped.vehicle.speed), 1e-6))
     obs, reward, term, trunc, info = env.step(3)
     if term or trunc:
         break

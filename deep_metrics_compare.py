@@ -27,6 +27,7 @@ from stable_baselines3 import PPO
 
 from config import ENV_CONFIG, RSS_CONFIG
 from rss import RSSConfig, RSSSafetyWrapper
+from scene_utils import check_ego_blocked
 from stackelberg.config import GameConfig
 from stackelberg.expert import StackelbergExpert
 from moe_hybrid import HybridExpert, make_env as moe_make_env
@@ -46,22 +47,7 @@ DESIRED_SPEED = 25.0  # m/s
 BLOCKED_SPEED_RATIO = 0.85  # front_speed < 85% of ego_speed = blocked
 
 
-def check_blocked(env):
-    """Check if ego is blocked behind a significantly slower front vehicle."""
-    ego = env.unwrapped.vehicle
-    road = env.unwrapped.road
-    front, _ = road.neighbour_vehicles(ego, ego.lane_index)
-    if front is None:
-        return False, float("inf"), 0.0
-    try:
-        lane = road.network.get_lane(ego.lane_index)
-        ego_s = float(lane.local_coordinates(ego.position)[0])
-        front_s = float(lane.local_coordinates(front.position)[0])
-        gap = front_s - ego_s
-        blocked = gap < 80.0 and float(front.speed) < BLOCKED_SPEED_RATIO * float(ego.speed)
-        return blocked, gap, float(front.speed)
-    except (ValueError, IndexError):
-        return False, float("inf"), 0.0
+check_blocked = check_ego_blocked  # alias for backward compatibility
 
 
 def compute_lane_distribution(env, history):
