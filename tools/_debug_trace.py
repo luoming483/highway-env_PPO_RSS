@@ -7,7 +7,7 @@ import gymnasium as gym
 import highway_env  # noqa
 import numpy as np
 from stackelberg.config import GameConfig
-from stackelberg.stackelberg_expert import StackelbergExpert
+from stackelberg.expert import StackelbergExpert
 
 seed = 42
 env_config = {

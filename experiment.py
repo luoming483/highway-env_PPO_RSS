@@ -89,6 +89,9 @@ def run_experiments(
                 device=device,
                 verbose=verbose,
                 rss_overrides=exp_cfg.get("rss_overrides", {}),
+                train_rss_overrides=exp_cfg.get("train_rss_overrides", {}),
+                use_blocked_penalty=exp_cfg.get("use_blocked_penalty", False),
+                use_force_explore=exp_cfg.get("use_force_explore", False),
                 model_dir=model_dir,
                 log_dir=log_dir,
             )

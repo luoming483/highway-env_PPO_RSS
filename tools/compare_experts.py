@@ -11,8 +11,8 @@ Metrics per seed:
     emergency_brakes, actions distribution, fsm_states distribution
 
 Usage:
-    D:\\anaconda\\envs\\ppo_main\\python.exe -m stackelberg.compare_experts
-    D:\\anaconda\\envs\\ppo_main\\python.exe -m stackelberg.compare_experts --ppo-model results/models/ppo_model.zip
+    D:\\anaconda\\envs\\ppo_main\\python.exe tools/compare_experts.py
+    D:\\anaconda\\envs\\ppo_main\\python.exe tools/compare_experts.py --ppo-model results/models/ppo_model.zip
 """
 
 import argparse
@@ -45,22 +45,40 @@ MAX_STEPS = 200
 def make_env(density_name: str, seed: int) -> gym.Env:
     density = DENSITY_LEVELS[density_name]
     config = {
-        "observation": {"type": "Kinematics", "vehicles_count": density["vehicles_count"]},
+        "observation": {
+            "type": "Kinematics",
+            "vehicles_count": density["vehicles_count"],
+            "features": ["presence", "x", "y", "vx", "vy", "cos_h", "sin_h"],
+            "absolute": False,
+        },
         "action": {
             "type": "DiscreteMetaAction",
             "target_speeds": [0, 5, 10, 15, 20, 25, 30],
         },
-        "lanes_count": 3,
+        "lanes_count": 4,
         "vehicles_count": density["vehicles_count"],
         "vehicles_density": density["vehicles_density"],
         "duration": 50,
-        "simulation_frequency": 15,
+        "simulation_frequency": 8,
         "policy_frequency": 4,
         "collision_reward": -5.0,
         "normalize_reward": True,
         "offroad_terminal": True,
     }
     env = gym.make("highway-fast-v0", config=config)
+    env.reset(seed=seed)
+    return env
+
+
+def make_env_ppo(seed: int) -> gym.Env:
+    """Create env matching the PPO training config (v=20, 7 features, 4 lanes)."""
+    from config import ENV_CONFIG
+    ppo_config = dict(ENV_CONFIG)
+    ppo_config["action"] = {
+        "type": "DiscreteMetaAction",
+        "target_speeds": [0, 5, 10, 15, 20, 25, 30],
+    }
+    env = gym.make("highway-fast-v0", config=ppo_config)
     env.reset(seed=seed)
     return env
 
@@ -254,12 +272,13 @@ def run_ppo_rss(env: gym.Env, model_path: str, density: str = "", seed: int = 0)
 
     model = PPO.load(model_path, device="cpu")
     from config import RSS_CONFIG
-    from rss_safety import RSSConfig as _RSSConfig, RSSSafetyWrapper
+    from rss import RSSConfig as _RSSConfig, RSSSafetyWrapper
 
     rss_env = RSSSafetyWrapper(env, rss_config=_RSSConfig(**RSS_CONFIG))
     from gymnasium.wrappers import FlattenObservation
     rss_env = FlattenObservation(rss_env)
 
+    obs, _ = rss_env.reset()
     done = False
     step = 0
     speeds = []
@@ -270,7 +289,11 @@ def run_ppo_rss(env: gym.Env, model_path: str, density: str = "", seed: int = 0)
     crashed = False
 
     while not done and step < MAX_STEPS:
-        action, _ = model.predict(rss_env.observation(obs) if 'obs' in dir() else obs, deterministic=True)
+        action, _ = model.predict(obs, deterministic=True)
+        if isinstance(action, np.ndarray):
+            action = int(action.item())
+        else:
+            action = int(action)
         obs, reward, terminated, truncated, env_info = rss_env.step(action)
         step += 1
         speeds.append(float(env.unwrapped.vehicle.speed))
@@ -304,8 +327,9 @@ def print_summary(all_results: List[RunResult]):
     for r in all_results:
         grouped[(r.method, r.density)].append(r)
 
-    methods = ["Stackelberg", "IDM_Baseline", "Random"]
+    methods = ["Stackelberg", "IDM_Baseline", "Random", "PPO+RSS"]
     densities = list(DENSITY_LEVELS.keys())
+    ppo_density_labels = [f"{d}(20v)" for d in densities]
 
     print()
     print("=" * 120)
@@ -319,6 +343,9 @@ def print_summary(all_results: List[RunResult]):
     for method in methods:
         for density in densities:
             key = (method, density)
+            # PPO+RSS uses fixed 20v env, labeled as "density(20v)"
+            if method == "PPO+RSS":
+                key = (method, f"{density}(20v)")
             if key not in grouped:
                 continue
             runs = grouped[key]
@@ -356,19 +383,22 @@ def print_gating_analysis(all_results: List[RunResult]):
     for r in all_results:
         by_method[r.method].append(r)
 
-    for method in ["Stackelberg", "IDM_Baseline", "Random"]:
+    for method in ["Stackelberg", "IDM_Baseline", "Random", "PPO+RSS"]:
         runs = by_method.get(method, [])
         if not runs:
             continue
         collisions = sum(1 for r in runs if r.crashed)
         n = len(runs)
         avg_speed = np.mean([r.avg_speed for r in runs])
-        avg_min_ttc = np.mean([r.min_ttc for r in runs if np.isfinite(r.min_ttc)])
+        min_ttc_vals = [r.min_ttc for r in runs if np.isfinite(r.min_ttc)]
+        avg_min_ttc = np.mean(min_ttc_vals) if min_ttc_vals else 0.0
 
         # Count scenarios by density
         by_density = defaultdict(list)
         for r in runs:
-            by_density[r.density].append(r)
+            # Strip "(20v)" suffix from PPO+RSS density labels for display
+            density = r.density.replace("(20v)", "")
+            by_density[density].append(r)
 
         print(f"\n  {method}:")
         print(f"    Collision rate: {collisions}/{n} ({collisions/n:.1%})")
@@ -391,29 +421,82 @@ def print_gating_analysis(all_results: List[RunResult]):
     print()
 
 
+def _find_ppo_models() -> Dict[int, str]:
+    """Auto-detect trained PPO+RSS (our_method) models by seed.
+
+    Prefers the directory with more complete models to avoid mixing
+    models with different observation spaces (105 vs 140 dims).
+    """
+    candidates = [
+        Path("runs/20260615_163841/models"),
+        Path("results_v1_30k/models"),
+        Path("results/models"),
+    ]
+    best: Dict[int, str] = {}
+    for base in candidates:
+        if not base.exists():
+            continue
+        models: Dict[int, str] = {}
+        for d in sorted(base.iterdir()):
+            if not d.is_dir() or not d.name.startswith("our_method_seed"):
+                continue
+            try:
+                seed = int(d.name.replace("our_method_seed", ""))
+                model_path = d / "final_model.zip"
+                if model_path.exists():
+                    models[seed] = str(model_path.resolve())
+            except ValueError:
+                continue
+        # Prefer directory with more complete models
+        if len(models) >= len(best):
+            best = models
+    return best
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--ppo-model", type=str, default=None,
-                        help="Path to trained PPO model .zip file")
+                        help="Path to a single trained PPO model .zip file")
     parser.add_argument("--seeds", type=int, default=8,
                         help="Number of seeds to test")
     parser.add_argument("--density", type=str, default=None,
                         help="Only test one density level")
     parser.add_argument("--json-output", type=str, default=None,
                         help="Save results to JSON file")
+    parser.add_argument("--skip-ppo", action="store_true",
+                        help="Skip PPO+RSS even if models are found")
     args = parser.parse_args()
 
+    # Auto-detect PPO models
+    ppo_models = {}
+    if args.ppo_model:
+        ppo_models[0] = args.ppo_model  # single model for all seeds
+    elif not args.skip_ppo:
+        ppo_models = _find_ppo_models()
+        if ppo_models:
+            print(f"Auto-detected {len(ppo_models)} PPO+RSS models: seeds {sorted(ppo_models.keys())}")
+
     seeds = SEEDS[:args.seeds]
+    # If using auto-detected PPO models, filter to seeds present in all methods
+    if ppo_models and not args.ppo_model:
+        common_seeds = [s for s in seeds if s in ppo_models]
+        if common_seeds:
+            seeds = common_seeds
+            print(f"Using {len(seeds)} seeds present in all methods: {seeds}")
+        else:
+            print("Warning: No overlapping seeds between SEEDS and PPO models")
+            seeds = [s for s in sorted(ppo_models.keys()) if s < 10000][:args.seeds]
+
     densities = [args.density] if args.density else list(DENSITY_LEVELS.keys())
 
     all_results: List[RunResult] = []
 
+    methods_display = "Stackelberg | IDM_Baseline | Random"
+    if ppo_models:
+        methods_display += " | PPO+RSS"
     print("Stackelberg Expert — Comparison Experiment")
     print("=" * 60)
-    print(f"Methods: Stackelberg | IDM_Baseline | Random", end="")
-    if args.ppo_model:
-        print(" | PPO+RSS", end="")
-    print()
+    print(f"Methods: {methods_display}")
     print(f"Densities: {densities}")
     print(f"Seeds: {len(seeds)}")
     print(f"Max steps/episode: {MAX_STEPS}")
@@ -449,17 +532,18 @@ def main():
             result = run_random(env, density=density, seed=seed)
             all_results.append(result)
             env.close()
-            print(f"[Random] crash={result.crashed} spd={result.avg_speed:.1f} lc={result.lc_count}")
+            print(f"[Random] crash={result.crashed} spd={result.avg_speed:.1f} lc={result.lc_count}", end="")
 
-            # PPO+RSS (if model provided)
-            if args.ppo_model:
-                env = make_env(density, seed)
-                result = run_ppo_rss(env, args.ppo_model)
+            # PPO+RSS (auto-detected or specified) — uses fixed training config
+            if seed in ppo_models or (args.ppo_model and args.ppo_model):
+                model_path = ppo_models.get(seed, args.ppo_model)
+                ppo_env = make_env_ppo(seed)
+                result = run_ppo_rss(ppo_env, model_path, density=f"{density}(20v)", seed=seed)
                 if result:
-                    result.density = density
-                    result.seed = seed
                     all_results.append(result)
-                env.close()
+                    print(f" | [PPO+RSS] crash={result.crashed} spd={result.avg_speed:.1f} lc={result.lc_count}", end="")
+                ppo_env.close()
+            print()
 
     print_summary(all_results)
     print_gating_analysis(all_results)

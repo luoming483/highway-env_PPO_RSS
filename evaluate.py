@@ -11,7 +11,7 @@ from gymnasium.wrappers import FlattenObservation
 from stable_baselines3 import PPO
 
 from config import ENV_CONFIG, ENV_ID, MODEL_DIR, N_EVAL_EPISODES, RSS_CONFIG, SEEDS
-from rss_safety import RSSConfig, RSSSafetyWrapper
+from rss import RSSConfig, RSSSafetyWrapper
 
 
 def evaluate_model(

@@ -20,7 +20,7 @@ Usage:
 from .config import DRIVING_STYLE_WEIGHTS, GameConfig
 from .fsm_executor import FSMExecutor, FSMState, RateLimiter
 from .game_solver import GameResult, StackelbergSolver
-from .stackelberg_expert import StackelbergExpert, StackelbergWrapper
+from .expert import StackelbergExpert, StackelbergWrapper
 from .trajectory_predictor import (
     TrajectoryPoint,
     VehicleState,

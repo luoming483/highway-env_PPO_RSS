@@ -33,7 +33,7 @@ ENV_CONFIG = {
     "collision_reward": -5.0,
     "right_lane_reward": 0.02,
     "high_speed_reward": 0.70,
-    "lane_change_reward": 0.12,
+    "lane_change_reward": 1.0,
     "reward_speed_range": [20, 30],
     "normalize_reward": True,
     "offroad_terminal": True,
@@ -55,7 +55,7 @@ PPO_PARAMS = {
     "gamma": 0.99,
     "gae_lambda": 0.95,
     "clip_range": 0.2,
-    "ent_coef": 0.005,
+    "ent_coef": 0.01,
     "vf_coef": 0.5,
     "max_grad_norm": 0.5,
     "target_kl": 0.02,
@@ -83,6 +83,25 @@ RSS_CONFIG = {
     "enable_shield": True,
 }
 
+# Relaxed RSS for training: allow lane-change exploration
+# Key insight: RSS safe_front_distance = min_distance + v*response_time + braking_term
+# At 25 m/s, default = 8 + 25*1.0 + 18.75 = 51.75m, but avg gap is only 34m
+# → Most LCs are blocked by front-distance check, not side_gap
+# Fix: reduce min_distance and response_time to shrink safe_front_distance
+TRAIN_RSS_OVERRIDES = {
+    "lane_change_side_gap": 2.0,
+    "min_distance": 3.0,
+    "response_time": 0.3,
+    "rear_response_time": 0.3,
+}
+
+# Blocked penalty: disabled (penalty=0) to avoid agent learning "just go slower"
+# Use LC_ATTEMPT_BONUS as immediate shaping reward for exploring LC when blocked
+BLOCKED_PENALTY = 0.0
+BLOCKED_GAP_THRESHOLD = 80.0   # wider detection window
+BLOCKED_SPEED_RATIO = 0.90     # more permissive — catch more slow-vehicle situations
+LC_ATTEMPT_BONUS = 1.0         # immediate reward for attempting LC while blocked
+
 # ---- Action Labels ----
 ACTION_LABELS = {0: "LANE_LEFT", 1: "IDLE", 2: "LANE_RIGHT", 3: "FASTER", 4: "SLOWER"}
 
@@ -106,6 +125,9 @@ EXPERIMENTS: Dict[str, Dict] = {
         "use_rss": True,
         "use_curriculum": True,
         "rss_overrides": {"intervention_penalty": -0.5},
+        "train_rss_overrides": {"lane_change_side_gap": 1.0},
+        "use_blocked_penalty": True,
+        "use_force_explore": True,
         "color": "#2ca02c",
         "linestyle": "-",
         "marker": "s",
@@ -116,6 +138,9 @@ EXPERIMENTS: Dict[str, Dict] = {
         "use_rss": True,
         "use_curriculum": False,
         "rss_overrides": {"intervention_penalty": -0.5},
+        "train_rss_overrides": {"lane_change_side_gap": 1.0},
+        "use_blocked_penalty": True,
+        "use_force_explore": True,
         "color": "#ff7f0e",
         "linestyle": "--",
         "marker": "^",
@@ -129,6 +154,16 @@ EXPERIMENTS: Dict[str, Dict] = {
         "color": "#d62728",
         "linestyle": ":",
         "marker": "D",
+    },
+    "ppo_lc": {
+        "name": "ppo_lc",
+        "label": "PPO Lane-Change (No RSS train, RSS eval)",
+        "use_rss": False,
+        "use_curriculum": False,
+        "rss_overrides": {},
+        "color": "#e67e22",
+        "linestyle": "-",
+        "marker": "*",
     },
 }
 

@@ -21,6 +21,157 @@ class RSSConfig:
     enable_shield: bool = True
 
 
+# Standalone RSS helpers (used by both check_rss_safety and RSSSafetyWrapper)
+
+def _lane_exists(road, lane_index: Tuple) -> bool:
+    start, end, lane_id = lane_index
+    graph = road.network.graph
+    if start not in graph or end not in graph.get(start, {}):
+        return False
+    return 0 <= lane_id < len(graph[start][end])
+
+
+def _lane_longitudinal(road, lane_index: Tuple, vehicle) -> float:
+    lane = road.network.get_lane(lane_index)
+    longi, _ = lane.local_coordinates(vehicle.position)
+    return float(longi)
+
+
+def _safe_distance_front_st(rss_cfg: RSSConfig, ego_speed: float, front_speed: float) -> float:
+    braking_term = max(0.0, (ego_speed**2 - front_speed**2) / (2.0 * max(rss_cfg.max_brake, 1e-3)))
+    return float(rss_cfg.min_distance + ego_speed * rss_cfg.response_time + braking_term)
+
+
+def _safe_distance_rear_st(rss_cfg: RSSConfig, rear_speed: float, ego_speed: float) -> float:
+    braking_term = max(0.0, (rear_speed**2 - ego_speed**2) / (2.0 * max(rss_cfg.max_brake, 1e-3)))
+    return float(rss_cfg.min_distance + rear_speed * rss_cfg.rear_response_time + braking_term)
+
+
+def _scan_nearby_vehicle_risk_st(
+    env, ego, lane_index: Tuple, rss_cfg: RSSConfig,
+    check_rear: bool, check_side: bool,
+) -> Tuple[bool, str]:
+    lane = env.unwrapped.road.network.get_lane(lane_index)
+    ego_s, _ = lane.local_coordinates(ego.position)
+    ego_s = float(ego_s)
+    horizon = float(rss_cfg.nearby_vehicle_horizon)
+    side_gap = float(rss_cfg.lane_change_side_gap)
+    lateral_margin = float(rss_cfg.lane_width * 0.75)
+
+    for other in env.unwrapped.road.vehicles:
+        if other is ego:
+            continue
+        other_s, other_lat = lane.local_coordinates(other.position)
+        if abs(float(other_lat)) > lateral_margin:
+            continue
+        other_s = float(other_s)
+        gap = float(other_s - ego_s)
+        if abs(gap) > horizon:
+            continue
+
+        if check_side and abs(gap) < side_gap:
+            return True, "nearby_vehicle_side_risk"
+
+        if gap > 0.0:
+            closing = float(ego.speed - other.speed)
+            ttc = gap / closing if closing > 1e-6 else np.inf
+            safe_front = _safe_distance_front_st(rss_cfg, float(ego.speed), float(other.speed))
+            if gap < safe_front or ttc < rss_cfg.ttc_threshold:
+                return True, "nearby_vehicle_front_risk"
+        else:
+            if not check_rear:
+                continue
+            rear_gap = -gap
+            closing = float(other.speed - ego.speed)
+            ttc = rear_gap / closing if closing > 1e-6 else np.inf
+            safe_rear = _safe_distance_rear_st(rss_cfg, float(other.speed), float(ego.speed))
+            if rear_gap < safe_rear or ttc < rss_cfg.ttc_threshold:
+                return True, "nearby_vehicle_rear_risk"
+
+    return False, ""
+
+
+def check_rss_safety(env, action: int, rss_cfg: RSSConfig) -> Tuple[bool, str]:
+    """Standalone RSS safety check for PPO actions in MoE.
+
+    Returns (unsafe: bool, reason: str).
+    Uses env.unwrapped for vehicle/road access.
+    """
+    ego = env.unwrapped.vehicle
+    road = env.unwrapped.road
+
+    # Determine candidate lane for this action
+    current_lane = ego.lane_index
+    if action == 0:  # LEFT
+        lane_index = (current_lane[0], current_lane[1], current_lane[2] - 1)
+    elif action == 2:  # RIGHT
+        lane_index = (current_lane[0], current_lane[1], current_lane[2] + 1)
+    else:
+        lane_index = current_lane
+
+    if not _lane_exists(road, lane_index):
+        return True, "invalid_lane"
+
+    front, rear = road.neighbour_vehicles(ego, lane_index)
+
+    # Front gap / TTC
+    front_gap = np.inf
+    front_ttc = np.inf
+    if front is not None:
+        ego_s = _lane_longitudinal(road, lane_index, ego)
+        front_s = _lane_longitudinal(road, lane_index, front)
+        front_gap = float(front_s - ego_s)
+        rel_speed = float(ego.speed - front.speed)
+        if front_gap > 0.0 and rel_speed > 1e-6:
+            front_ttc = front_gap / rel_speed
+
+    # Rear gap / TTC
+    rear_gap = np.inf
+    rear_ttc = np.inf
+    if rear is not None:
+        ego_s = _lane_longitudinal(road, lane_index, ego)
+        rear_s = _lane_longitudinal(road, lane_index, rear)
+        rear_gap = float(ego_s - rear_s)
+        rel_speed = float(rear.speed - ego.speed)
+        if rear_gap > 0.0 and rel_speed > 1e-6:
+            rear_ttc = rear_gap / rel_speed
+
+    safe_front = _safe_distance_front_st(rss_cfg, float(ego.speed), float(front.speed) if front is not None else 0.0)
+    safe_rear = _safe_distance_rear_st(rss_cfg, float(rear.speed) if rear is not None else 0.0, float(ego.speed))
+
+    lane_change = action in (0, 2)
+
+    # Scan nearby vehicles
+    nearby_risk, nearby_reason = _scan_nearby_vehicle_risk_st(
+        env, ego, lane_index, rss_cfg,
+        check_rear=lane_change, check_side=lane_change,
+    )
+
+    if lane_change:
+        if nearby_risk:
+            return True, nearby_reason
+        if front_gap < safe_front or front_ttc < rss_cfg.ttc_threshold:
+            return True, "lane_change_front_risk"
+        if rear_gap < safe_rear or rear_ttc < rss_cfg.ttc_threshold:
+            return True, "lane_change_rear_risk"
+        return False, ""
+
+    if action == 3:  # FASTER
+        if nearby_risk:
+            return True, nearby_reason
+        if front_gap < safe_front or front_ttc < rss_cfg.ttc_threshold:
+            return True, "accel_front_risk"
+    if action == 1:  # IDLE
+        if nearby_risk:
+            return True, nearby_reason
+        if front_ttc < (0.8 * rss_cfg.ttc_threshold):
+            return True, "idle_imminent_front_risk"
+    if action == 4:  # SLOWER
+        if front_ttc < (0.5 * rss_cfg.ttc_threshold):
+            return True, "slower_insufficient"
+    return False, ""
+
+
 class RSSSafetyWrapper(gym.Wrapper):
     """
     Action-end RSS shield for highway-env discrete meta-actions.
